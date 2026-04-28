@@ -1,0 +1,9 @@
+anthropic
+pandas
+openpyxl
+pdfplumber
+pymupdf
+pytesseract
+Pillow
+playwright
+requests

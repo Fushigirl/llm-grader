@@ -1,0 +1,26 @@
+# 学生データと採点結果（個人情報を含む）
+data/submissions/*/
+data/*.xlsx
+data/*.csv
+data/*.txt
+
+# 採点結果
+result/*.csv
+result/*.xlsx
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+.env
+
+# デバッグ・作業用ファイル
+debug*.py
+test_*.py
+check_*.py
+*.ipynb
+
+# OS
+.DS_Store
+Thumbs.db
