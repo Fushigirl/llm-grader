@@ -167,7 +167,12 @@ def _run_two_phase(
     ui_user: str,
     ui_pass: str,
 ) -> tuple:
-    extraction_prompt = build_extraction_prompt(pdf_text[:MAX_PDF_CHARS])
+    if len(pdf_text) > MAX_PDF_CHARS:
+        half = MAX_PDF_CHARS // 2
+        truncated = pdf_text[:half] + "\n...(中略)...\n" + pdf_text[-half:]
+    else:
+        truncated = pdf_text
+    extraction_prompt = build_extraction_prompt(truncated)
     extracted = call_llm(extraction_prompt, backend, model, ui_url, ui_user, ui_pass, max_tokens=2000)
 
     if "考察記述なし" in extracted or len(extracted.strip()) < 10:
@@ -218,6 +223,10 @@ def main():
         help="UI login username (or set LLM_USER env var; ui backend only)",
     )
     parser.add_argument("--no-excel", action="store_true", help="Skip Excel report generation")
+    parser.add_argument(
+        "--ocr-pages", type=int, default=0, metavar="N",
+        help="OCR時に末尾Nページのみ処理（0=全ページ、デフォルト）",
+    )
     args = parser.parse_args()
 
     # Resolve model
@@ -236,7 +245,7 @@ def main():
         ui_user = args.ui_user or os.environ.get("LLM_USER", "")
         if not ui_user:
             ui_user = input("UI username: ").strip()
-        ui_pass = getpass.getpass("UI password: ")
+        ui_pass = os.environ.get("LLM_PASS") or getpass.getpass("UI password: ")
 
     # Rubric
     if args.rubric:
@@ -300,7 +309,7 @@ def main():
         print(f"Processing: {folder}")
 
         try:
-            pdf_text = extract_pdf_text(pdf_path)
+            pdf_text = extract_pdf_text(pdf_path, ocr_last_pages=args.ocr_pages)
             if not pdf_text.strip():
                 print("  → text extraction failed (including OCR)")
                 results.append({
@@ -315,9 +324,9 @@ def main():
                 args.ui_url, ui_user, ui_pass,
             )
             print("done")
-            preview = extracted[:100].replace("\n", " ")
+            preview = extracted[:100].replace("\n", " ").encode(sys.stdout.encoding or "utf-8", errors="replace").decode(sys.stdout.encoding or "utf-8")
             print(f"  [{len(extracted)} chars] {preview}...")
-            eval_preview = evaluation[:100].replace("\n", " ")
+            eval_preview = evaluation[:100].replace("\n", " ").encode(sys.stdout.encoding or "utf-8", errors="replace").decode(sys.stdout.encoding or "utf-8")
             print(f"  Phase 2: {eval_preview}")
             print()
 
