@@ -131,17 +131,18 @@ def make_excel(
     ws = wb.active
     ws.title = "採点結果"
 
-    columns = [
-        ("No.",           5,  "center"),
-        ("学生名",         18, "left"),
-        ("採点者",         12, "left"),
-        ("基準1",          6,  "center"),
-        ("基準1 判断理由",  40, "left"),
-        ("基準2",          6,  "center"),
-        ("基準2 判断理由",  40, "left"),
-        ("総評",           50, "left"),
-        ("抽出した考察",    55, "left"),
-    ]
+    # Detect criteria columns dynamically (基準1, 基準2, 基準3, ...)
+    criteria_nums = sorted(
+        int(re.search(r"\d+", c).group())
+        for c in df.columns
+        if re.match(r"^基準\d+$", c)
+    )
+
+    columns = [("No.", 5, "center"), ("学生名", 18, "left"), ("採点者", 12, "left")]
+    for n in criteria_nums:
+        columns.append((f"基準{n}",         6,  "center"))
+        columns.append((f"基準{n} 判断理由", 40, "left"))
+    columns += [("総評", 50, "left"), ("抽出した考察", 55, "left")]
 
     # Header row
     for c, (h, w, _) in enumerate(columns, 1):
@@ -158,25 +159,24 @@ def make_excel(
         r = i + 2
         bg = COLOR_ROW_ODD if i % 2 == 0 else COLOR_ROW_EVEN
 
-        k1_raw   = str(row.get("基準1", ""))
-        k2_raw   = str(row.get("基準2", ""))
-        sym1     = _extract_symbol(k1_raw)
-        sym2     = _extract_symbol(k2_raw)
-        comment1 = _clean_comment(k1_raw, r"基準\s*1")
-        comment2 = _clean_comment(k2_raw, r"基準\s*2")
-        souhy    = _clean_souhy(str(row.get("総評", "")))
+        criteria_raws = {n: str(row.get(f"基準{n}", "")) for n in criteria_nums}
+        souhy     = _clean_souhy(str(row.get("総評", "")))
         extracted = str(row.get("抽出考察", ""))
         raw_name  = str(row.get("学生", ""))
         name      = _shorten_name(raw_name)
         evaluator = _match_evaluator(raw_name, assignment)
 
-        row_data   = [i + 1, name, evaluator, sym1, comment1, sym2, comment2, souhy, extracted]
-        row_colors = [
-            bg, bg, bg,
-            _score_color(k1_raw), bg,
-            _score_color(k2_raw), bg,
-            bg, bg,
-        ]
+        row_data = [i + 1, name, evaluator]
+        for n in criteria_nums:
+            row_data.append(_extract_symbol(criteria_raws[n]))
+            row_data.append(_clean_comment(criteria_raws[n], rf"基準\s*{n}"))
+        row_data += [souhy, extracted]
+        row_colors = [bg, bg, bg]
+        for n in criteria_nums:
+            row_colors.append(_score_color(criteria_raws[n]))
+            row_colors.append(bg)
+        row_colors += [bg, bg]
+
         row_aligns = [al for (_, _, al) in columns]
 
         for c, (v, fc, al) in enumerate(zip(row_data, row_colors, row_aligns), 1):
@@ -186,8 +186,9 @@ def make_excel(
             cell.border = _BORDER
             cell.font = Font(size=10)
 
-        # Score symbol columns — larger, centred
-        for c in (4, 6):
+        # 基準N 記号列 — larger, centred
+        symbol_cols = [4 + i * 2 for i in range(len(criteria_nums))]
+        for c in symbol_cols:
             ws.cell(row=r, column=c).font = Font(bold=True, size=14)
             ws.cell(row=r, column=c).alignment = Alignment(
                 horizontal="center", vertical="center"
