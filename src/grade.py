@@ -204,7 +204,6 @@ def _run_two_phase(
         else:
             no_reflection = (
                 "基準1: × ― 考察記述が見当たりません。\n"
-                "基準2: × ― 考察記述が見当たりません。\n"
                 "総評: 提出物に考察相当の記述が確認できませんでした。"
             )
             return extracted, no_reflection
