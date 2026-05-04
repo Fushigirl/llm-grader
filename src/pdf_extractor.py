@@ -3,12 +3,23 @@
 
 import io
 import os
+import re
 import sys
 import shutil
 import fitz
 import pdfplumber
 import pytesseract
 from PIL import Image
+
+_SPACED_CJK = re.compile(
+    r'[、-鿿！-｠①-⓿]'
+    r'(?: [、-鿿！-｠①-⓿])+'
+)
+
+
+def _normalize_spaced_cjk(text: str) -> str:
+    """Collapse spaces between CJK characters produced by image-based PDF extraction."""
+    return _SPACED_CJK.sub(lambda m: m.group(0).replace(' ', ''), text)
 
 def _find_tesseract() -> str:
     # 1. PATH上を検索
@@ -76,7 +87,7 @@ def extract_pdf_text(pdf_path: str, ocr_last_pages: int = 0) -> str:
         with pdfplumber.open(pdf_path) as pdf:
             text = "\n".join(p.extract_text() or "" for p in pdf.pages)
         if _cjk_ratio(text) >= 0.05:
-            return text
+            return _normalize_spaced_cjk(text)
     except Exception:
         pass
 
@@ -85,12 +96,12 @@ def extract_pdf_text(pdf_path: str, ocr_last_pages: int = 0) -> str:
         doc = fitz.open(pdf_path)
         text = "\n".join(page.get_text() for page in doc)
         if _cjk_ratio(text) >= 0.05:
-            return text
+            return _normalize_spaced_cjk(text)
     except Exception:
         pass
 
     # 3. OCR
     try:
-        return _ocr_pdf(pdf_path, last_n_pages=ocr_last_pages)
+        return _normalize_spaced_cjk(_ocr_pdf(pdf_path, last_n_pages=ocr_last_pages))
     except Exception:
         return ""

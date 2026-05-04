@@ -24,7 +24,7 @@ import getpass
 import pandas as pd
 
 from pdf_extractor import extract_pdf_text
-from llm_client import call_llm
+from llm_client import call_llm, extract_reflection_only
 
 DEFAULT_SUBMISSIONS_DIR = "data/submissions"
 DEFAULT_RUBRIC_FILE = "data/rubric.txt"
@@ -50,7 +50,9 @@ def build_extraction_prompt(pdf_text: str) -> str:
 抽出ルール:
 - コードそのもの（import, plt., def, for 等）は除く
 - データの出力結果（数値の表・グラフラベル等）は除く
-- 課題説明文・問題文（「〜しなさい」「〜を求めよ」等）は除く
+- 課題説明文・問題文（「〜しなさい」「〜を求めよ」「〜記入してください」等）は除く
+- ただし問題文の直後に学生の回答が続いている場合は、問題文部分を除いて学生の回答部分だけを抽出する
+- 考察が1文・2文と非常に短い場合でも、学生が書いた内容であれば必ず抽出する（短さを理由に「考察記述なし」としない）
 - 学生が自分の言葉で書いた分析・解釈・考えだけを残す
 - 複数の考察問題がある場合は「【問N】」のように番号を付けて区別する
 
@@ -82,18 +84,18 @@ def build_evaluation_prompt(student_name: str, extracted: str, rubric: str) -> s
 【評価ポイント・模範解答】
 {rubric}
 
-評価ポイントの各基準について、学生の考察が満たしているかを以下の形式で返してください。
+評価ポイントに含まれる各基準について、学生の考察が満たしているかを以下の形式で返してください。
 記号の判定基準:
 ○: 模範解答の内容に少しでも似た記述・言及があれば○（完全一致不要）
 △: 全く関係ない内容だが何か書いている
 ×: 何も書いていない、または明らかに的外れ
 
 基準1: ○/△/× ― コメント（1文）
-基準2: ○/△/× ― コメント（1文）
+（評価ポイントに基準が複数ある場合は基準2、基準3と同じ形式で続ける。基準が1つだけなら基準1のみ出力する）
 総評: （2文以内）
 
 注意:
-- 返答は上記3行だけにしてください。
+- 返答は上記の形式のみにしてください。基準の数は評価ポイントに記載された数に合わせてください。
 - 根拠が抽出テキストに無い内容を補完しないでください。"""
 
 
@@ -146,14 +148,28 @@ def _assignment_order(folder: str, assignment: list) -> int:
 
 def _parse_eval_result(raw: str) -> dict:
     row: dict = {"詳細（抽出）": "", "詳細（評価）": raw}
+    fallback_criteria: list = []  # 基準N 番号なしで記号だけの行
+
     for line in raw.splitlines():
         line = line.strip()
-        if re.match(r"基準\s*1", line):
-            row["基準1"] = line
-        elif re.match(r"基準\s*2", line):
-            row["基準2"] = line
+        # 「基準1: ○ ―...」形式
+        m = re.match(r"基準\s*(\d+)", line)
+        if m:
+            row[f"基準{m.group(1)}"] = line
+        # 「○: ...」「×: ...」など番号なし形式
+        elif re.match(r"^[○△×][：:]", line):
+            fallback_criteria.append(line)
         elif line.startswith("総評"):
             row["総評"] = line
+
+    # 番号なし形式を基準1, 基準2, ... に割り当て（正規形式がない番号のみ）
+    fb_idx = 1
+    for fb_line in fallback_criteria:
+        while f"基準{fb_idx}" in row:
+            fb_idx += 1
+        row[f"基準{fb_idx}"] = f"基準{fb_idx}: {fb_line}"
+        fb_idx += 1
+
     return row
 
 
@@ -173,15 +189,25 @@ def _run_two_phase(
     else:
         truncated = pdf_text
     extraction_prompt = build_extraction_prompt(truncated)
-    extracted = call_llm(extraction_prompt, backend, model, ui_url, ui_user, ui_pass, max_tokens=2000)
+    raw = call_llm(extraction_prompt, backend, model, ui_url, ui_user, ui_pass, max_tokens=2000)
+    extracted = extract_reflection_only(raw)
 
-    if "考察記述なし" in extracted or len(extracted.strip()) < 10:
-        no_reflection = (
-            "基準1: × ― 考察記述が見当たりません。\n"
-            "基準2: × ― 考察記述が見当たりません。\n"
-            "総評: 提出物に考察相当の記述が確認できませんでした。"
+    if extracted.strip() == "考察記述なし" or len(extracted.strip()) < 10:
+        # フォールバック: 「記入してください」直後のテキストを直接抽出
+        m = re.search(
+            r'記[入⼊]してください[。.]*\s*(.{5,})',
+            truncated,
+            re.DOTALL,
         )
-        return extracted, no_reflection
+        if m:
+            extracted = m.group(1).strip()
+        else:
+            no_reflection = (
+                "基準1: × ― 考察記述が見当たりません。\n"
+                "基準2: × ― 考察記述が見当たりません。\n"
+                "総評: 提出物に考察相当の記述が確認できませんでした。"
+            )
+            return extracted, no_reflection
 
     eval_prompt = build_evaluation_prompt(student_name, extracted, rubric)
     evaluation = call_llm(eval_prompt, backend, model, ui_url, ui_user, ui_pass, max_tokens=900)
@@ -224,8 +250,8 @@ def main():
     )
     parser.add_argument("--no-excel", action="store_true", help="Skip Excel report generation")
     parser.add_argument(
-        "--ocr-pages", type=int, default=0, metavar="N",
-        help="OCR時に末尾Nページのみ処理（0=全ページ、デフォルト）",
+        "--ocr-pages", type=int, default=2, metavar="N",
+        help="OCR時に末尾Nページのみ処理（0=全ページ、デフォルト:2）",
     )
     args = parser.parse_args()
 
@@ -295,50 +321,70 @@ def main():
     print(f"Students: {len(folders)}  Output: {csv_path}")
     print("=" * 60)
 
-    results = []
-    for folder in folders:
-        folder_path = os.path.join(args.submissions_dir, folder)
-        pdfs = [f for f in os.listdir(folder_path) if f.lower().endswith(".pdf")]
+    def _grade_folders(target_folders: list) -> list:
+        loop_results = []
+        for folder in target_folders:
+            folder_path = os.path.join(args.submissions_dir, folder)
+            pdfs = [f for f in os.listdir(folder_path) if f.lower().endswith(".pdf")]
 
-        if not pdfs:
-            print(f"[skip] {folder} — no PDF found")
-            results.append({"学生": folder, "基準1": "", "基準2": "", "総評": "PDFなし"})
-            continue
-
-        pdf_path = os.path.join(folder_path, pdfs[0])
-        print(f"Processing: {folder}")
-
-        try:
-            pdf_text = extract_pdf_text(pdf_path, ocr_last_pages=args.ocr_pages)
-            if not pdf_text.strip():
-                print("  → text extraction failed (including OCR)")
-                results.append({
-                    "学生": folder, "基準1": "", "基準2": "",
-                    "総評": "テキスト抽出失敗（OCRも不可）",
-                })
+            if not pdfs:
+                print(f"[skip] {folder} — no PDF found")
+                loop_results.append({"学生": folder, "総評": "PDFなし"})
                 continue
 
-            print("  Phase 1: extracting reflection ... ", end="", flush=True)
-            extracted, evaluation = _run_two_phase(
-                folder, pdf_text, rubric, args.backend, model,
-                args.ui_url, ui_user, ui_pass,
-            )
-            print("done")
-            preview = extracted[:100].replace("\n", " ").encode(sys.stdout.encoding or "utf-8", errors="replace").decode(sys.stdout.encoding or "utf-8")
-            print(f"  [{len(extracted)} chars] {preview}...")
-            eval_preview = evaluation[:100].replace("\n", " ").encode(sys.stdout.encoding or "utf-8", errors="replace").decode(sys.stdout.encoding or "utf-8")
-            print(f"  Phase 2: {eval_preview}")
-            print()
+            pdf_path = os.path.join(folder_path, pdfs[0])
+            print(f"Processing: {folder}")
 
-            row = {"学生": folder, "抽出考察": extracted}
-            row.update(_parse_eval_result(evaluation))
-            results.append(row)
+            try:
+                pdf_text = extract_pdf_text(pdf_path, ocr_last_pages=args.ocr_pages)
+                if not pdf_text.strip():
+                    print("  → text extraction failed (including OCR)")
+                    loop_results.append({"学生": folder, "総評": "テキスト抽出失敗（OCRも不可）"})
+                    continue
 
-        except Exception as e:
-            print(f"  Error: {e}")
-            results.append({"学生": folder, "基準1": "", "基準2": "", "総評": f"エラー: {e}"})
+                print("  Phase 1: extracting reflection ... ", end="", flush=True)
+                extracted, evaluation = _run_two_phase(
+                    folder, pdf_text, rubric, args.backend, model,
+                    args.ui_url, ui_user, ui_pass,
+                )
+                print("done")
+                enc = sys.stdout.encoding or "utf-8"
+                preview = extracted[:100].replace("\n", " ").encode(enc, errors="replace").decode(enc)
+                print(f"  [{len(extracted)} chars] {preview}...")
+                eval_preview = evaluation[:100].replace("\n", " ").encode(enc, errors="replace").decode(enc)
+                print(f"  Phase 2: {eval_preview}")
+                print()
+
+                row = {"学生": folder, "抽出考察": extracted}
+                row.update(_parse_eval_result(evaluation))
+                loop_results.append(row)
+
+            except Exception as e:
+                print(f"  Error: {e}")
+                loop_results.append({"学生": folder, "総評": f"エラー: {e}"})
+
+        return loop_results
+
+    results = _grade_folders(folders)
+
+    # 考察抽出に失敗した学生を1回だけ自動リトライ
+    def _extraction_failed(row: dict) -> bool:
+        val = str(row.get("抽出考察", "")).strip()
+        return not val or val == "考察記述なし" or len(val) < 10
+
+    still_failed = [r["学生"] for r in results if _extraction_failed(r)]
+    if still_failed:
+        print(f"\n考察抽出失敗 {len(still_failed)} 人 → 自動リトライ")
+        print("=" * 60)
+        retry_results = _grade_folders(still_failed)
+        results_map = {r["学生"]: r for r in results}
+        for r in retry_results:
+            if not _extraction_failed(r):
+                results_map[r["学生"]] = r
+        results = list(results_map.values())
 
     df = pd.DataFrame(results)
+
     df.to_csv(csv_path, index=False, encoding="utf-8-sig")
     print(f"\nSaved CSV: {csv_path}")
 
